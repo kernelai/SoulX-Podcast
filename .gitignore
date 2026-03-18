@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 pretrained_models/
+output/
 outputs/
 
 # API temporary files
