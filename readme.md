@@ -159,6 +159,45 @@ git clone https://huggingface.co/Soul-AILab/SoulX-Podcast-1.7B-dialect pretraine
 ```
 
 
+### RunPod Deployment
+
+One-click deployment script for RunPod (or similar GPU cloud environments). It handles cloning, venv creation, dependency installation, and model downloading. The venv and models are persisted so that restarting the Pod skips redundant setup.
+
+```sh
+# Default: uses /workspace as root directory (RunPod Network Volume mount point)
+bash setup_runpod.sh
+
+# Custom root directory (e.g. /home/root)
+bash setup_runpod.sh --root /home/root
+
+# Or via environment variable
+ROOT_DIR=/home/root bash setup_runpod.sh
+
+# Download dialect model and auto-start API
+bash setup_runpod.sh --root /home/root --model dialect --enable-api
+
+# Download both models
+bash setup_runpod.sh --model both
+```
+
+**Options:**
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `--root DIR` | `ROOT_DIR` | `/workspace` | Root directory for project, venv, and cache |
+| `--model TYPE` | `MODEL_BASE` | `base` | Model to download: `base`, `dialect`, or `both` |
+| `--enable-api` | `ENABLE_API` | `false` | Start API server after setup |
+
+**Directory layout** (when `--root /home/root`):
+
+```
+/home/root/
+  SoulX-Podcast/              # Project code (git clone)
+    pretrained_models/         # Downloaded models
+  venv/                        # Python virtual environment
+  .cache/                      # HuggingFace / s3tokenizer cache
+```
+
 ### Basic Usage
 
 You can simply run the demo with the following commands:

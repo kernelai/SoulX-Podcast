@@ -1,19 +1,50 @@
 #!/bin/bash
+# 如果用 sh 执行，自动切换到 bash
+if [ -z "$BASH_VERSION" ]; then
+    exec bash "$0" "$@"
+fi
 # ============================================================
 # SoulX-Podcast RunPod 部署脚本（支持 Network Volume 持久化）
 # 适用镜像: runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 # GPU: RTX 4090 (24GB VRAM)
 #
-# Network Volume 挂载到 /workspace，venv 和模型存储在其中，
-# Pod 删除后再重建无需重新安装依赖和下载模型。
+# 默认根目录为 /workspace（Network Volume 挂载点），可通过
+# 环境变量或命令行参数自定义：
+#   ROOT_DIR=/home/root bash setup_runpod.sh
+#   bash setup_runpod.sh --root /home/root
 # ============================================================
 
 set -e
 
-WORK_DIR="/workspace/SoulX-Podcast"
-VENV_DIR="/workspace/venv"
-MODEL_BASE="base"       # base | dialect | both
-ENABLE_API=false        # true: 启动 API 服务; false: 仅安装环境
+# 解析命令行参数
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --root)
+            ROOT_DIR="$2"
+            shift 2
+            ;;
+        --model)
+            MODEL_BASE="$2"
+            shift 2
+            ;;
+        --enable-api)
+            ENABLE_API=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--root DIR] [--model base|dialect|both] [--enable-api]"
+            exit 1
+            ;;
+    esac
+done
+
+# 支持环境变量 ROOT_DIR，默认 /workspace
+ROOT_DIR="${ROOT_DIR:-/workspace}"
+WORK_DIR="${ROOT_DIR}/SoulX-Podcast"
+VENV_DIR="${ROOT_DIR}/venv"
+MODEL_BASE="${MODEL_BASE:-base}"       # base | dialect | both
+ENABLE_API="${ENABLE_API:-false}"      # true: 启动 API 服务; false: 仅安装环境
 
 # ------------------------------------------------------------
 # 颜色输出
@@ -23,9 +54,9 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+log_warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
+log_error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
 
 # ------------------------------------------------------------
 # 1. 克隆项目
@@ -42,7 +73,7 @@ fi
 cd "$WORK_DIR"
 
 # 持久化缓存到 Network Volume（s3tokenizer ONNX 模型、HuggingFace 等）
-export XDG_CACHE_HOME="/workspace/.cache"
+export XDG_CACHE_HOME="${ROOT_DIR}/.cache"
 
 # ------------------------------------------------------------
 # 2. 创建 venv + 安装依赖（已存在则跳过）
@@ -169,12 +200,9 @@ esac
 # ------------------------------------------------------------
 log_info "Step 4/5: 环境验证..."
 
-python3 << 'PYEOF'
-import torch
-import transformers
-import s3tokenizer
-import triton
-
+_verify_script=$(mktemp /tmp/verify_env_XXXXXX.py)
+cat > "$_verify_script" << 'PYEOF'
+import torch, transformers, s3tokenizer, triton
 print(f"PyTorch:       {torch.__version__}")
 print(f"CUDA:          {torch.version.cuda}")
 if torch.cuda.is_available():
@@ -187,6 +215,8 @@ else:
 print(f"Transformers:  {transformers.__version__}")
 print(f"Triton:        {triton.__version__}")
 PYEOF
+python3 "$_verify_script"
+rm -f "$_verify_script"
 
 # 验证模型文件完整性
 log_info "验证模型文件..."
@@ -216,8 +246,8 @@ echo "  项目目录: $WORK_DIR"
 echo "  venv 目录: $VENV_DIR"
 echo ""
 echo "  后续启动 Pod 时只需执行:"
-echo "    source /workspace/venv/bin/activate"
-echo "    cd /workspace/SoulX-Podcast"
+echo "    source ${ROOT_DIR}/venv/bin/activate"
+echo "    cd ${ROOT_DIR}/SoulX-Podcast"
 echo ""
 echo "  快速测试 (CLI):"
 echo "    # 播客对话生成"
