@@ -158,12 +158,9 @@ class BatchTaskQueue:
             with self._lock:
                 task.progress = 80
 
-            # Save wav file
+            # Save wav file (include task_id to guarantee uniqueness)
             stem = Path(task.filename).stem
-            output_path = self._output_dir / f"{stem}.wav"
-            # Avoid overwriting: append task_id suffix if file exists
-            if output_path.exists():
-                output_path = self._output_dir / f"{stem}_{task.task_id[:8]}.wav"
+            output_path = self._output_dir / f"{stem}_{task.task_id[:8]}.wav"
 
             wavfile.write(str(output_path), sample_rate, audio_array)
 
@@ -200,6 +197,9 @@ class BatchTaskQueue:
         Returns list of all task_ids (including invalid ones).
         """
         task_ids = []
+        ids_to_enqueue = []
+
+        # Phase 1: register tasks under lock (no blocking I/O)
         with self._lock:
             for script in scripts:
                 task_id = uuid.uuid4().hex[:12]
@@ -227,8 +227,13 @@ class BatchTaskQueue:
                 )
                 self._tasks[task_id] = task
                 self._task_order.append(task_id)
-                self._queue.put(task_id)
+                ids_to_enqueue.append(task_id)
                 task_ids.append(task_id)
+
+        # Phase 2: enqueue outside lock to avoid deadlock when queue is full
+        # (worker needs self._lock in _process_task to drain the queue)
+        for tid in ids_to_enqueue:
+            self._queue.put(tid)
 
         logger.info(f"Added {len(task_ids)} tasks to batch queue")
         return task_ids

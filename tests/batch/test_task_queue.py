@@ -230,7 +230,7 @@ class TestWorkerProcessing:
         _wait_until_done(q, timeout=5)
 
         task = list(q._tasks.values())[0]
-        assert task.output_path.stem == "my_podcast"
+        assert task.output_path.stem.startswith("my_podcast_")
         q.shutdown()
 
 

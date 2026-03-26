@@ -74,6 +74,12 @@ class TestParseInvalidFiles:
         assert result.is_valid is False
         assert result.error_msg is not None
 
+    def test_parse_tag_without_content(self, fixtures_dir):
+        """A line with only [S2] tag and no text should be invalid."""
+        result = parse_txt_file(fixtures_dir / "invalid_empty_tag.txt")
+        assert result.is_valid is False
+        assert "2" in result.error_msg  # should mention line 2
+
     def test_parse_unknown_encoding(self, tmp_path):
         """Write bytes that can't be decoded as UTF-8 or GBK."""
         bad_file = tmp_path / "bad_encoding.txt"

@@ -19,8 +19,8 @@ class ParsedScript:
     error_msg: Optional[str] = None
 
 
-# Valid speaker tag pattern: [S1] through [S4]
-_SPEAKER_TAG_RE = re.compile(r"^\[S[1-4]\]")
+# Valid speaker tag pattern: [S1] through [S4], followed by non-empty content
+_SPEAKER_TAG_RE = re.compile(r"^\[S[1-4]\].+")
 
 
 def _read_file_content(file_path: Path) -> str:
@@ -53,7 +53,7 @@ def _validate_lines(lines: list[str]) -> tuple[bool, Optional[str]]:
     has_any_tag = False
     for i, line in enumerate(lines, start=1):
         if not _SPEAKER_TAG_RE.match(line):
-            return False, f"第 {i} 行格式错误：缺少说话人标签 [S1]~[S4]，内容：{line[:30]}"
+            return False, f"第 {i} 行格式错误：需要 [S1]~[S4] 标签后跟文本内容，当前：{line[:30]}"
         has_any_tag = True
 
     if not has_any_tag:

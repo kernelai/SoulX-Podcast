@@ -348,7 +348,7 @@ def dialogue_synthesis_function(
     finally:
         model_lock.release()
 
-    from webui_batch import concat_generated_wavs
+    from batch.audio_utils import concat_generated_wavs
     audio_array = concat_generated_wavs(results_dict)
     return (24000, audio_array)
 

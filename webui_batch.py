@@ -16,34 +16,12 @@ import numpy as np
 import random
 import torch
 
+from batch.audio_utils import concat_generated_wavs
 from batch.file_parser import parse_txt_files
 from batch.task_queue import BatchTaskQueue, SpeakerConfig, STATUS_COMPLETED
 from batch.downloader import pack_to_zip
 
 logger = logging.getLogger(__name__)
-
-
-def concat_generated_wavs(results_dict: dict) -> np.ndarray:
-    """
-    Concatenate generated wav segments into a single audio array.
-
-    Shared by both single-synthesis and batch-synthesis paths to
-    avoid logic duplication.
-
-    Args:
-        results_dict: Output from model.forward_longform(),
-                      must contain 'generated_wavs' key.
-
-    Returns:
-        1-D numpy float32 array of the concatenated audio.
-    """
-    wavs = results_dict["generated_wavs"]
-    if not wavs:
-        return np.array([], dtype=np.float32)
-    target_audio = wavs[0]
-    for wav in wavs[1:]:
-        target_audio = torch.concat([target_audio, wav], axis=1)
-    return target_audio.cpu().squeeze(0).numpy()
 
 # Batch output directory: output/batch_{timestamp}/
 _BATCH_OUTPUT_BASE = Path("output/batch")
@@ -229,6 +207,10 @@ def render_batch_tab(
             gr.Warning("请先上传 TXT 文件")
             return gr.update(), gr.update(), gr.update(), False
 
+        if not spk1_audio or not spk2_audio:
+            gr.Warning("请提供说话人 1 和说话人 2 的参考语音")
+            return gr.update(), gr.update(), gr.update(), False
+
         global _batch_queue
         # Reset queue with new output dir for each batch run
         with _batch_queue_lock:
@@ -278,9 +260,14 @@ def render_batch_tab(
 
         return table, summary, gr.update(active=True), True
 
+    def _get_queue() -> Optional[BatchTaskQueue]:
+        """Thread-safe read of the global batch queue reference."""
+        with _batch_queue_lock:
+            return _batch_queue
+
     def on_cancel():
         """Handle cancel button click."""
-        q = _batch_queue
+        q = _get_queue()
         if q is None:
             return gr.update(), gr.update()
         count = q.cancel_all_pending()
@@ -290,7 +277,7 @@ def render_batch_tab(
 
     def on_refresh():
         """Auto-refresh callback from Timer."""
-        q = _batch_queue
+        q = _get_queue()
         if q is None:
             return [], "无任务", gr.update(active=False), gr.update(choices=[]), gr.update()
 
@@ -312,7 +299,7 @@ def render_batch_tab(
 
     def on_zip_download():
         """Pack all completed files into a zip."""
-        q = _batch_queue
+        q = _get_queue()
         if q is None:
             gr.Warning("没有可下载的文件")
             return None
@@ -328,7 +315,7 @@ def render_batch_tab(
 
     def on_single_download(filename):
         """Download a single completed file."""
-        q = _batch_queue
+        q = _get_queue()
         if q is None or not filename:
             return None
         paths = q.get_completed_paths()
@@ -339,7 +326,7 @@ def render_batch_tab(
 
     def on_delete_completed():
         """Delete all completed tasks and their wav files."""
-        q = _batch_queue
+        q = _get_queue()
         if q is None:
             return gr.update(), gr.update(), gr.update()
         count = q.delete_completed()
