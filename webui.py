@@ -1,4 +1,6 @@
 import re
+import threading
+
 import gradio as gr
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -8,8 +10,8 @@ import importlib.util
 from datetime import datetime
 
 import torch
-import numpy as np  
-import random    
+import numpy as np
+import random
 import s3tokenizer
 
 from soulxpodcast.models.soulxpodcast import SoulXPodcast
@@ -100,6 +102,9 @@ EXAMPLES_LIST = [
     ],
 ]
 
+
+# Global model lock: shared between single-synthesis and batch-synthesis
+model_lock = threading.Lock()
 
 model: SoulXPodcast = None
 dataset: PodcastInferHandler = None
@@ -319,26 +324,33 @@ def dialogue_synthesis_function(
     # Go synthesis
     progress_bar = gr.Progress(track_tqdm=True)
     prompt_wav_list = [spk1_prompt_audio, spk2_prompt_audio]
-    prompt_text_list = [spk1_prompt_text, spk2_prompt_text] 
+    prompt_text_list = [spk1_prompt_text, spk2_prompt_text]
     use_dialect_prompt = spk1_dialect_prompt_text.strip()!="" or spk2_dialect_prompt_text.strip()!=""
     dialect_prompt_text_list = [spk1_dialect_prompt_text, spk2_dialect_prompt_text]
-    data = process_single(
-        target_text_list,
-        prompt_wav_list,
-        prompt_text_list,
-        use_dialect_prompt,
-        dialect_prompt_text_list,
-    )
-    results_dict = model.forward_longform(
-        **data
-    )
-    target_audio = None
-    for i in range(len(results_dict['generated_wavs'])):
-        if target_audio is None:
-            target_audio = results_dict['generated_wavs'][i]
-        else:
-            target_audio = torch.concat([target_audio, results_dict['generated_wavs'][i]], axis=1)
-    return (24000, target_audio.cpu().squeeze(0).numpy())
+
+    # Acquire global model lock (shared with batch worker)
+    # Timeout 300s: batch inference per task can take minutes
+    acquired = model_lock.acquire(timeout=300)
+    if not acquired:
+        gr.Warning("批量任务正在处理中，已等待超时，请稍后再试")
+        return None
+    try:
+        data = process_single(
+            target_text_list,
+            prompt_wav_list,
+            prompt_text_list,
+            use_dialect_prompt,
+            dialect_prompt_text_list,
+        )
+        results_dict = model.forward_longform(
+            **data
+        )
+    finally:
+        model_lock.release()
+
+    from webui_batch import concat_generated_wavs
+    audio_array = concat_generated_wavs(results_dict)
+    return (24000, audio_array)
 
 
 def update_example_choices(dialect_key: str):
@@ -362,217 +374,223 @@ def update_prompt_text(dialect_key: str, example_key: str):
 
 
 def render_interface() -> gr.Blocks:
+    from webui_batch import render_batch_tab
+
     with gr.Blocks(title="SoulX-Podcast", theme=gr.themes.Default()) as page:
+        with gr.Tabs():
+            with gr.Tab("单条合成"):
 
-        with gr.Row():
-            lang_choice = gr.Radio(
-                choices=["中文", "English"],
-                value="中文",
-                label="Display Language/显示语言",
-                type="index",
-                interactive=True,
-                scale=3,
-            )
-            seed_input = gr.Number(
-                label="Seed (种子)",
-                value=1988,
-                step=1,
-                interactive=True,
-                scale=1,
-            )
-
-        with gr.Row():
-
-            with gr.Column(scale=1):
-                with gr.Group(visible=True) as spk1_prompt_group:
-                    spk1_prompt_audio = gr.Audio(
-                        label=i18n("spk1_prompt_audio_label"),
-                        type="filepath",
-                        editable=False,
-                        interactive=True,
-                    )
-                    spk1_prompt_text = gr.Textbox(
-                        label=i18n("spk1_prompt_text_label"),
-                        placeholder=i18n("spk1_prompt_text_placeholder"),
-                        lines=3,
-                    )
-                    spk1_dialect_prompt_text = gr.Textbox(
-                        label=i18n("spk1_dialect_prompt_text_label"),
-                        placeholder=i18n("spk1_dialect_prompt_text_placeholder"),
-                        value="",
-                        lines=3,
-                    )
-
-            with gr.Column(scale=1, visible=True):
-                with gr.Group(visible=True) as spk2_prompt_group:
-                    spk2_prompt_audio = gr.Audio(
-                        label=i18n("spk2_prompt_audio_label"),
-                        type="filepath",
-                        editable=False,
-                        interactive=True,
-                    )
-                    spk2_prompt_text = gr.Textbox(
-                        label=i18n("spk2_prompt_text_label"),
-                        placeholder=i18n("spk2_prompt_text_placeholder"),
-                        lines=3,
-                    )
-                    spk2_dialect_prompt_text = gr.Textbox(
-                        label=i18n("spk2_dialect_prompt_text_label"),
-                        placeholder=i18n("spk2_dialect_prompt_text_placeholder"),
-                        value="",
-                        lines=3,
-                    )
-
-            with gr.Column(scale=2):
                 with gr.Row():
-                    dialogue_text_input = gr.Textbox(
-                        label=i18n("dialogue_text_input_label"),
-                        placeholder=i18n("dialogue_text_input_placeholder"),
-                        lines=18,
+                    lang_choice = gr.Radio(
+                        choices=["中文", "English"],
+                        value="中文",
+                        label="Display Language/显示语言",
+                        type="index",
+                        interactive=True,
+                        scale=3,
+                    )
+                    seed_input = gr.Number(
+                        label="Seed (种子)",
+                        value=1988,
+                        step=1,
+                        interactive=True,
+                        scale=1,
                     )
 
-        # Generate button
-        with gr.Row():
-            generate_btn = gr.Button(
-                value=i18n("generate_btn_label"), 
-                variant="primary", 
-                scale=3,
-                size="lg",
-            )
-        
-        # Long output audio
-        generate_audio = gr.Audio(
-            label=i18n("generated_audio_label"),
-            interactive=False,
-        )
+                with gr.Row():
 
+                    with gr.Column(scale=1):
+                        with gr.Group(visible=True) as spk1_prompt_group:
+                            spk1_prompt_audio = gr.Audio(
+                                label=i18n("spk1_prompt_audio_label"),
+                                type="filepath",
+                                editable=False,
+                                interactive=True,
+                            )
+                            spk1_prompt_text = gr.Textbox(
+                                label=i18n("spk1_prompt_text_label"),
+                                placeholder=i18n("spk1_prompt_text_placeholder"),
+                                lines=3,
+                            )
+                            spk1_dialect_prompt_text = gr.Textbox(
+                                label=i18n("spk1_dialect_prompt_text_label"),
+                                placeholder=i18n("spk1_dialect_prompt_text_placeholder"),
+                                value="",
+                                lines=3,
+                            )
 
-        with gr.Row():
-            inputs_for_examples = [
-                spk1_prompt_audio,
-                spk1_prompt_text,
-                spk1_dialect_prompt_text,
-                spk2_prompt_audio,
-                spk2_prompt_text,
-                spk2_dialect_prompt_text,
-                dialogue_text_input,
-            ]
-            
-            gr.Examples(
-                examples=EXAMPLES_LIST,
-                inputs=inputs_for_examples,
-                label="播客模板示例 (点击加载)",
-                examples_per_page=5,
-            )
-        
-        with gr.Accordion("方言提示文本 (Dialect Prompt) 选择器", open=False):
-            gr.Markdown("选择方言后，请分别为 S1 和 S2 选择一个示例。")
-            dialect_selector = gr.Dropdown(
-                label="选择方言 (Select Dialect)", 
-                choices=DIALECT_CHOICES, 
-                value="(无)",
-                interactive=True
-            )
-            with gr.Row():
-                s1_dialect_example_selector = gr.Dropdown(
-                    label="S1 方言示例 (S1 Dialect Example)", 
-                    choices=["(请先选择方言)"], 
-                    value="(无)",
-                    interactive=True,
-                    elem_classes="gradio-dropdown" 
+                    with gr.Column(scale=1, visible=True):
+                        with gr.Group(visible=True) as spk2_prompt_group:
+                            spk2_prompt_audio = gr.Audio(
+                                label=i18n("spk2_prompt_audio_label"),
+                                type="filepath",
+                                editable=False,
+                                interactive=True,
+                            )
+                            spk2_prompt_text = gr.Textbox(
+                                label=i18n("spk2_prompt_text_label"),
+                                placeholder=i18n("spk2_prompt_text_placeholder"),
+                                lines=3,
+                            )
+                            spk2_dialect_prompt_text = gr.Textbox(
+                                label=i18n("spk2_dialect_prompt_text_label"),
+                                placeholder=i18n("spk2_dialect_prompt_text_placeholder"),
+                                value="",
+                                lines=3,
+                            )
+
+                    with gr.Column(scale=2):
+                        with gr.Row():
+                            dialogue_text_input = gr.Textbox(
+                                label=i18n("dialogue_text_input_label"),
+                                placeholder=i18n("dialogue_text_input_placeholder"),
+                                lines=18,
+                            )
+
+                # Generate button
+                with gr.Row():
+                    generate_btn = gr.Button(
+                        value=i18n("generate_btn_label"),
+                        variant="primary",
+                        scale=3,
+                        size="lg",
+                    )
+
+                # Long output audio
+                generate_audio = gr.Audio(
+                    label=i18n("generated_audio_label"),
+                    interactive=False,
                 )
-                s2_dialect_example_selector = gr.Dropdown(
-                    label="S2 方言示例 (S2 Dialect Example)", 
-                    choices=["(请先选择方言)"], 
-                    value="(无)",
-                    interactive=True,
-                    elem_classes="gradio-dropdown" 
+
+                with gr.Row():
+                    inputs_for_examples = [
+                        spk1_prompt_audio,
+                        spk1_prompt_text,
+                        spk1_dialect_prompt_text,
+                        spk2_prompt_audio,
+                        spk2_prompt_text,
+                        spk2_dialect_prompt_text,
+                        dialogue_text_input,
+                    ]
+
+                    gr.Examples(
+                        examples=EXAMPLES_LIST,
+                        inputs=inputs_for_examples,
+                        label="播客模板示例 (点击加载)",
+                        examples_per_page=5,
+                    )
+
+                with gr.Accordion("方言提示文本 (Dialect Prompt) 选择器", open=False):
+                    gr.Markdown("选择方言后，请分别为 S1 和 S2 选择一个示例。")
+                    dialect_selector = gr.Dropdown(
+                        label="选择方言 (Select Dialect)",
+                        choices=DIALECT_CHOICES,
+                        value="(无)",
+                        interactive=True
+                    )
+                    with gr.Row():
+                        s1_dialect_example_selector = gr.Dropdown(
+                            label="S1 方言示例 (S1 Dialect Example)",
+                            choices=["(请先选择方言)"],
+                            value="(无)",
+                            interactive=True,
+                            elem_classes="gradio-dropdown"
+                        )
+                        s2_dialect_example_selector = gr.Dropdown(
+                            label="S2 方言示例 (S2 Dialect Example)",
+                            choices=["(请先选择方言)"],
+                            value="(无)",
+                            interactive=True,
+                            elem_classes="gradio-dropdown"
+                        )
+
+                dialect_selector.change(
+                    fn=update_example_choices,
+                    inputs=[dialect_selector],
+                    outputs=[s1_dialect_example_selector, s2_dialect_example_selector]
                 )
-        
-        dialect_selector.change(
-            fn=update_example_choices,
-            inputs=[dialect_selector],
-            outputs=[s1_dialect_example_selector, s2_dialect_example_selector]
-        )
-        
-        s1_dialect_example_selector.change(
-            fn=update_prompt_text,
-            inputs=[dialect_selector, s1_dialect_example_selector],
-            outputs=[spk1_dialect_prompt_text]
-        )
-        
-        s2_dialect_example_selector.change(
-            fn=update_prompt_text,
-            inputs=[dialect_selector, s2_dialect_example_selector],
-            outputs=[spk2_dialect_prompt_text]
-        )
 
-        def _change_component_language(lang):
-            global global_lang
-            global_lang = ["zh", "en"][lang]
-            return [
-                
-                # spk1_prompt_{audio,text,dialect_prompt_text}
-                gr.update(label=i18n("spk1_prompt_audio_label")),
-                gr.update(
-                    label=i18n("spk1_prompt_text_label"),
-                    placeholder=i18n("spk1_prompt_text_placeholder"),
-                ),
-                gr.update(
-                    label=i18n("spk1_dialect_prompt_text_label"),
-                    placeholder=i18n("spk1_dialect_prompt_text_placeholder"),
-                ),
-                # spk2_prompt_{audio,text}
-                gr.update(label=i18n("spk2_prompt_audio_label")),
-                gr.update(
-                    label=i18n("spk2_prompt_text_label"),
-                    placeholder=i18n("spk2_prompt_text_placeholder"),
-                ),
-                gr.update(
-                    label=i18n("spk2_dialect_prompt_text_label"),
-                    placeholder=i18n("spk2_dialect_prompt_text_placeholder"),
-                ),
-                # dialogue_text_input
-                gr.update(
-                    label=i18n("dialogue_text_input_label"),
-                    placeholder=i18n("dialogue_text_input_placeholder"),
-                ),
-                # generate_btn
-                gr.update(value=i18n("generate_btn_label")),
-                # generate_audio
-                gr.update(label=i18n("generated_audio_label")),
-            ]
+                s1_dialect_example_selector.change(
+                    fn=update_prompt_text,
+                    inputs=[dialect_selector, s1_dialect_example_selector],
+                    outputs=[spk1_dialect_prompt_text]
+                )
 
-        lang_choice.change(
-            fn=_change_component_language,
-            inputs=[lang_choice],
-            outputs=[
-                spk1_prompt_audio,
-                spk1_prompt_text,
-                spk1_dialect_prompt_text,
-                spk2_prompt_audio,
-                spk2_prompt_text,
-                spk2_dialect_prompt_text,
-                dialogue_text_input,
-                generate_btn,
-                generate_audio,
-            ],
-        )
-        
-        generate_btn.click(
-            fn=dialogue_synthesis_function,
-            inputs=[
-                dialogue_text_input,
-                spk1_prompt_text,
-                spk1_prompt_audio,
-                spk1_dialect_prompt_text,
-                spk2_prompt_text,
-                spk2_prompt_audio,
-                spk2_dialect_prompt_text,
-                seed_input,
-            ],
-            outputs=[generate_audio],
-        )
+                s2_dialect_example_selector.change(
+                    fn=update_prompt_text,
+                    inputs=[dialect_selector, s2_dialect_example_selector],
+                    outputs=[spk2_dialect_prompt_text]
+                )
+
+                def _change_component_language(lang):
+                    global global_lang
+                    global_lang = ["zh", "en"][lang]
+                    return [
+                        # spk1_prompt_{audio,text,dialect_prompt_text}
+                        gr.update(label=i18n("spk1_prompt_audio_label")),
+                        gr.update(
+                            label=i18n("spk1_prompt_text_label"),
+                            placeholder=i18n("spk1_prompt_text_placeholder"),
+                        ),
+                        gr.update(
+                            label=i18n("spk1_dialect_prompt_text_label"),
+                            placeholder=i18n("spk1_dialect_prompt_text_placeholder"),
+                        ),
+                        # spk2_prompt_{audio,text}
+                        gr.update(label=i18n("spk2_prompt_audio_label")),
+                        gr.update(
+                            label=i18n("spk2_prompt_text_label"),
+                            placeholder=i18n("spk2_prompt_text_placeholder"),
+                        ),
+                        gr.update(
+                            label=i18n("spk2_dialect_prompt_text_label"),
+                            placeholder=i18n("spk2_dialect_prompt_text_placeholder"),
+                        ),
+                        # dialogue_text_input
+                        gr.update(
+                            label=i18n("dialogue_text_input_label"),
+                            placeholder=i18n("dialogue_text_input_placeholder"),
+                        ),
+                        # generate_btn
+                        gr.update(value=i18n("generate_btn_label")),
+                        # generate_audio
+                        gr.update(label=i18n("generated_audio_label")),
+                    ]
+
+                lang_choice.change(
+                    fn=_change_component_language,
+                    inputs=[lang_choice],
+                    outputs=[
+                        spk1_prompt_audio,
+                        spk1_prompt_text,
+                        spk1_dialect_prompt_text,
+                        spk2_prompt_audio,
+                        spk2_prompt_text,
+                        spk2_dialect_prompt_text,
+                        dialogue_text_input,
+                        generate_btn,
+                        generate_audio,
+                    ],
+                )
+
+                generate_btn.click(
+                    fn=dialogue_synthesis_function,
+                    inputs=[
+                        dialogue_text_input,
+                        spk1_prompt_text,
+                        spk1_prompt_audio,
+                        spk1_dialect_prompt_text,
+                        spk2_prompt_text,
+                        spk2_prompt_audio,
+                        spk2_dialect_prompt_text,
+                        seed_input,
+                    ],
+                    outputs=[generate_audio],
+                )
+
+            with gr.Tab("批量合成"):
+                render_batch_tab(process_single, lambda: model, model_lock)
+
     return page
 
 
