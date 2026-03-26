@@ -215,8 +215,14 @@ python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B
 
 # If you want to experience dialect podcast generation, use the dialectal model:
 python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B-dialect
+```
 
+Run in background (recommended for remote/SSH sessions to avoid disconnection):
+``` sh
+nohup python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B > webui.log 2>&1 &
 
+# View logs
+tail -f webui.log
 ```
 
 
