@@ -213,16 +213,37 @@ You can simply run the webui with the following commands:
 # Base Model:
 python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B
 
+# Enable fp16 flow for reduced VRAM usage (~0.75GB saving) with negligible quality difference:
+python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B --fp16_flow
+
 # If you want to experience dialect podcast generation, use the dialectal model:
 python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B-dialect
+
+# Use vLLM engine for faster inference:
+python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B --llm_engine vllm
 ```
 
 Run in background (recommended for remote/SSH sessions to avoid disconnection):
 ``` sh
-nohup python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B > webui.log 2>&1 &
+nohup python3 webui.py --model_path pretrained_models/SoulX-Podcast-1.7B --fp16_flow > webui.log 2>&1 &
 
 # View logs
 tail -f webui.log
+```
+
+### REST API
+
+``` sh
+# Base usage:
+python3 run_api.py --model pretrained_models/SoulX-Podcast-1.7B
+
+# Enable fp16 flow:
+FP16_FLOW=true python3 run_api.py --model pretrained_models/SoulX-Podcast-1.7B
+
+# Use vLLM engine:
+python3 run_api.py --model pretrained_models/SoulX-Podcast-1.7B --engine vllm
+
+# API docs available at http://localhost:8000/docs
 ```
 
 

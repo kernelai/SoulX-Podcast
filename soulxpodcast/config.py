@@ -122,7 +122,7 @@ class SamplingParams:
 class Config:
     model: str
     max_model_len: int = 8192  # 15s prompt + 30s generated audio for 25hz audio tokenizer
-    gpu_memory_utilization: float = 0.9
+    gpu_memory_utilization: float = 0.3
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     hf_config: SoulXPodcastLLMConfig | AutoConfig = field(default_factory=SoulXPodcastLLMConfig)
